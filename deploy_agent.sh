@@ -276,3 +276,125 @@ apply_permissions() {
     success "Helpers/config.json permissions: $config_mode (600)"
     return 0
 }
+
+# --------------------------------------------------------------------------
+# Roster handling
+# --------------------------------------------------------------------------
+
+# Sample names and addresses used by the fresh roster option. They are plain
+# arrays so the loop that writes the CSV stays easy to follow.
+SAMPLE_NAMES=(
+    "Alice Johnson" "Bob Smith" "Charlie Davis" "Diana Prince" "Ethan Cole"
+    "Fatima Noor" "George Mensah" "Hannah Kim" "Ibrahim Osei" "Jasmine Lee"
+    "Kevin Boateng" "Lucy Wanjiku" "Michael Otieno" "Naomi Achieng" "Peter Mwangi"
+    "Queenie Adhiambo" "Samuel Kiptoo" "Theresa Njeri" "Victor Chege" "Winnie Atieno"
+    "Yusuf Mohammed" "Zainab Hassan" "Andrew Kariuki" "Beatrice Naliaka" "Collins Barasa"
+    "Deborah Wafula" "Edwin Sangare" "Fatuma Ali" "Gabriel Rotich" "Halima Yusuf"
+    "Isaac Bett" "Judith Cheruiyot" "Kevin Mutua" "Lucy Akinyi" "Miriam Sang"
+)
+
+SAMPLE_EMAILS=(
+    "alice@example.com" "bob@example.com" "charlie@example.com" "diana@example.com"
+    "ethan@example.com" "fatima@example.com" "george@example.com" "hannah@example.com"
+    "ibrahim@example.com" "jasmine@example.com" "kevin@example.com" "lucy@example.com"
+    "michael@example.com" "naomi@example.com" "peter@example.com" "queenie@example.com"
+    "samuel@example.com" "theresa@example.com" "victor@example.com" "winnie@example.com"
+    "yusuf@example.com" "zainab@example.com" "andrew@example.com" "beatrice@example.com"
+    "collins@example.com" "deborah@example.com" "edwin@example.com" "fatuma@example.com"
+    "gabriel@example.com" "halima@example.com" "isaac@example.com" "judith@example.com"
+    "kevin.mutua@example.com" "lucy.akinyi@example.com" "miriam@example.com"
+)
+
+# How many sample records the generate option can supply.
+MAX_FRESH_STUDENTS="${#SAMPLE_NAMES[@]}"
+
+# Count the student rows in templates/assets.csv (the header is not a student).
+count_sample_students() {
+    local rows
+    rows="$(awk 'NR > 1 && NF > 0' "$TEMPLATE_ROSTER" | wc -l | tr -d ' ')"
+    printf '%s' "$rows"
+}
+
+# Option A: copy the header plus the first N rows of the supplied sample
+# roster. awk keeps the copy portable and preserves each row exactly.
+copy_sample_roster() {
+    local project_dir="$1"
+    local available count
+
+    available="$(count_sample_students)"
+    if [ ! "$available" -gt 0 ] 2>/dev/null; then
+        fail "The template roster $TEMPLATE_ROSTER has no student rows."
+        return 1
+    fi
+
+    info "The supplied sample roster has $available students."
+    info "How many of them should I copy? (1-$available)"
+
+    while true; do
+        IFS= read -r count || return 1
+        if is_integer_in_range "$count" 1 "$available"; then
+            break
+        fi
+        fail "Please enter a whole number between 1 and $available."
+    done
+
+    local target="$project_dir/Helpers/assets.csv"
+    # NR == 1 copies the header, rows 2..count+1 copy the chosen students.
+    if ! awk -v n="$count" 'NR == 1 || (NR > 1 && NR <= n + 1)' \
+        "$TEMPLATE_ROSTER" > "$target"; then
+        fail "Could not write the sample roster to $target"
+        return 1
+    fi
+
+    # Confirm the file really has one header plus the requested rows.
+    local written
+    written="$(awk 'NR > 1 && NF > 0' "$target" | wc -l | tr -d ' ')"
+    if [ "$written" != "$count" ]; then
+        fail "Roster copy check failed: expected $count rows, found $written."
+        return 1
+    fi
+    success "Copied the header and $count sample student rows to Helpers/assets.csv"
+    return 0
+}
+
+# Option B: write a brand new roster. Every student starts at zero recorded
+# sessions because this is the first session of a new class.
+generate_fresh_roster() {
+    local project_dir="$1"
+    local count index
+
+    info "I can generate up to $MAX_FRESH_STUDENTS students from built-in sample names."
+    info "How many students would you like? (1-$MAX_FRESH_STUDENTS)"
+
+    while true; do
+        IFS= read -r count || return 1
+        if is_integer_in_range "$count" 1 "$MAX_FRESH_STUDENTS"; then
+            break
+        fi
+        fail "Please enter a whole number between 1 and $MAX_FRESH_STUDENTS."
+    done
+
+    local target="$project_dir/Helpers/assets.csv"
+    {
+        printf 'Email,Names,Attendance Count,Absence Count\n'
+        index=0
+        while [ "$index" -lt "$count" ]; do
+            # The sample names contain no comma, quote or newline, so writing
+            # them straight into the CSV cannot break the file structure.
+            printf '%s,%s,0,0\n' "${SAMPLE_EMAILS[$index]}" "${SAMPLE_NAMES[$index]}"
+            index=$((index + 1))
+        done
+    } > "$target" || {
+        fail "Could not write the new roster to $target"
+        return 1
+    }
+
+    local written
+    written="$(awk 'NR > 1 && NF > 0' "$target" | wc -l | tr -d ' ')"
+    if [ "$written" != "$count" ]; then
+        fail "Roster check failed: expected $count rows, found $written."
+        return 1
+    fi
+    success "Generated $count new student rows with attendance and absence counts of 0"
+    return 0
+}
