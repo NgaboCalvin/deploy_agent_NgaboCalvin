@@ -560,10 +560,13 @@ ask_thresholds() {
 # $1 is the incomplete directory name (relative to the working directory).
 archive_interrupted_deployment() {
     local dir_name="$1"
+    # $2 is an optional reason, used only to word the message correctly when
+    # the deployment failed for an ordinary reason rather than a signal.
+    local reason="${2:-interrupted}"
     local project_dir="$PWD/$dir_name"
     local archive_file="$PWD/${dir_name}_archive.zip"
 
-    warn "Deployment was interrupted. Archiving the partial project..."
+    warn "Deployment was $reason. Archiving the partial project..."
     info "  Incomplete directory: $dir_name"
     info "  Archive file:        ${dir_name}_archive.zip"
 
@@ -658,6 +661,24 @@ remove_deployment_traps() {
     CURRENT_DEPLOY_DIR=""
 }
 
+# Called when a deployment step fails for an ordinary reason (a failed mkdir or
+# cp, say) rather than because of a signal. A half-built directory is just as
+# confusing as one left by Ctrl+C, so it goes through the same archive step
+# instead of being deleted or left behind silently.
+abort_deployment() {
+    local reason="$1"
+    local dir_name="$CURRENT_DEPLOY_DIR"
+
+    remove_deployment_traps
+
+    fail "Deployment failed: $reason"
+    if [ -n "$dir_name" ]; then
+        info ""
+        archive_interrupted_deployment "$dir_name" "stopped early"
+    fi
+    return 1
+}
+
 # --------------------------------------------------------------------------
 # Feature 1: deploy a new project
 # --------------------------------------------------------------------------
@@ -749,12 +770,12 @@ deploy_project() {
     install_deployment_traps
 
     if ! create_project_structure "$project_dir"; then
-        remove_deployment_traps
+        abort_deployment "could not create the directory structure."
         return 1
     fi
 
     if ! copy_templates "$project_dir"; then
-        remove_deployment_traps
+        abort_deployment "could not copy the template files."
         return 1
     fi
 
@@ -786,13 +807,12 @@ deploy_project() {
     fi
 
     if [ "$roster_ok" != "yes" ]; then
-        fail "Could not build the roster, so the deployment is incomplete."
-        remove_deployment_traps
+        abort_deployment "could not build the roster."
         return 1
     fi
 
     if ! set_total_sessions "$project_dir/Helpers/config.json" "$sessions"; then
-        remove_deployment_traps
+        abort_deployment "could not set total_sessions in the config."
         return 1
     fi
 
@@ -801,7 +821,7 @@ deploy_project() {
     fi
 
     if ! apply_permissions "$project_dir"; then
-        remove_deployment_traps
+        abort_deployment "could not set the file permissions."
         return 1
     fi
 

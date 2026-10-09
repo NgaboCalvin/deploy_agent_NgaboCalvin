@@ -627,6 +627,35 @@ assert_contains "no logs to archive" "$neither_out" "a clear message is shown wh
 assert_contains "attendance_tracker_logs/archives/attendance/attendance_" "$both_out" "the full attendance archive path is printed"
 assert_contains "attendance_tracker_logs/archives/absent/absent_" "$both_out" "the full absent archive path is printed"
 
+# I2: a deployment that fails for an ordinary reason must archive and clean up
+# the partial directory just like an interrupted one does.
+WS_I2="$(new_workspace aborted)"
+cd "$WS_I2" || exit 1
+DEPLOY_IN_PROGRESS="yes"
+CURRENT_DEPLOY_DIR="attendance_tracker_aborted"
+mkdir -p "$CURRENT_DEPLOY_DIR/Helpers"
+printf 'partial\n' > "$CURRENT_DEPLOY_DIR/Helpers/partial.txt"
+
+abort_out="$(abort_deployment "simulated failure." 2>&1)"
+abort_code=$?
+# The state check below runs in this shell, not a subshell, so abort_deployment
+# is called directly here rather than inside a command substitution.
+DEPLOY_IN_PROGRESS="yes"
+CURRENT_DEPLOY_DIR="attendance_tracker_aborted2"
+abort_deployment "simulated failure." >/dev/null 2>&1
+
+assert_eq "1" "$abort_code" "abort_deployment returns a failure status"
+assert_contains "Deployment failed: simulated failure." "$abort_out" "abort_deployment explains the failure"
+assert_contains "stopped early" "$abort_out" "abort_deployment says the deployment stopped early"
+assert_file_exists "$WS_I2/attendance_tracker_aborted_archive.zip" "a failed deployment still produces an archive"
+if [ ! -d "$WS_I2/attendance_tracker_aborted" ]; then
+    pass "a failed deployment removes its partial directory after archiving"
+else
+    failed "a failed deployment removes its partial directory after archiving"
+fi
+# The traps must be gone after an abort.
+assert_eq "no" "$DEPLOY_IN_PROGRESS" "abort_deployment clears the deployment state"
+
 # --------------------------------------------------------------------------
 section "I. Overwrite protection"
 # --------------------------------------------------------------------------
