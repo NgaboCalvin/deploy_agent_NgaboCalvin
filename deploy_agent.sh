@@ -354,6 +354,57 @@ count_sample_students() {
     printf '%s' "$rows"
 }
 
+# Ask Python to read a roster the same way attendance_checker.py does. If the
+# file is malformed in a way awk would not notice, this catches it before an
+# instructor hits it mid-session.
+check_roster_loadable() {
+    local roster_file="$1"
+    local problem
+
+    problem="$(python3 - "$roster_file" <<'PYEOF' 2>&1
+import csv, sys
+
+path = sys.argv[1]
+required = ["Email", "Names", "Attendance Count", "Absence Count"]
+
+with open(path, newline="", encoding="utf-8") as handle:
+    reader = csv.DictReader(handle)
+    fieldnames = reader.fieldnames
+    rows = list(reader)
+
+if not fieldnames:
+    print("the roster has no header row")
+    sys.exit(0)
+
+missing = [column for column in required if column not in fieldnames]
+if missing:
+    print("missing column(s): %s" % ", ".join(missing))
+    sys.exit(0)
+
+if not rows:
+    print("the roster has no student rows")
+    sys.exit(0)
+
+for number, row in enumerate(rows, start=2):
+    for column in ("Attendance Count", "Absence Count"):
+        try:
+            int(row[column])
+        except (TypeError, ValueError):
+            print("row %d has a non-numeric %s" % (number, column))
+            sys.exit(0)
+    if row["Names"] is None or row["Email"] is None:
+        print("row %d has fewer columns than the header" % number)
+        sys.exit(0)
+PYEOF
+)"
+
+    if [ -n "$problem" ]; then
+        fail "The roster $roster_file cannot be read by the application: $problem"
+        return 1
+    fi
+    return 0
+}
+
 # Option A: copy the header plus the first N rows of the supplied sample
 # roster. awk keeps the copy portable and preserves each row exactly.
 copy_sample_roster() {
@@ -393,6 +444,10 @@ copy_sample_roster() {
         return 1
     fi
     success "Copied the header and $count sample student rows to Helpers/assets.csv"
+
+    if ! check_roster_loadable "$target"; then
+        return 1
+    fi
     return 0
 }
 
@@ -456,6 +511,10 @@ generate_fresh_roster() {
         return 1
     fi
     success "Generated $count new student rows with attendance and absence counts of 0"
+
+    if ! check_roster_loadable "$target"; then
+        return 1
+    fi
     return 0
 }
 

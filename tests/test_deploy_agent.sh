@@ -1056,6 +1056,39 @@ assert_eq "1" "$trav_code" "a traversal attempt in archive_logs is rejected"
 assert_contains "Invalid project name" "$trav_out" "a traversal attempt is reported as an invalid name"
 assert_eq "$pwd_before" "$PWD" "the working directory is unchanged after a rejected name"
 
+# M1: a roster the application would choke on must be rejected at deployment
+# time rather than during a marking session.
+WS_M1="$(new_workspace rostercheck)"
+cd "$WS_M1" || exit 1
+
+cp "$REPO_DIR/templates/assets.csv" "$WS_M1/good.csv"
+if check_roster_loadable "$WS_M1/good.csv"; then
+    pass "a well-formed roster is accepted"
+else
+    failed "a well-formed roster is accepted"
+fi
+
+printf 'Email,Names,Attendance Count\n' > "$WS_M1/badcol.csv"
+if check_roster_loadable "$WS_M1/badcol.csv"; then
+    failed "a roster missing a required column is rejected"
+else
+    pass "a roster missing a required column is rejected"
+fi
+
+printf 'Email,Names,Attendance Count,Absence Count\na@b.com,X,notanumber,0\n' > "$WS_M1/badnum.csv"
+if check_roster_loadable "$WS_M1/badnum.csv"; then
+    failed "a roster with a non-numeric count is rejected"
+else
+    pass "a roster with a non-numeric count is rejected"
+fi
+
+printf 'Email,Names,Attendance Count,Absence Count\n' > "$WS_M1/norows.csv"
+if check_roster_loadable "$WS_M1/norows.csv"; then
+    failed "a roster with no student rows is rejected"
+else
+    pass "a roster with no student rows is rejected"
+fi
+
 # --------------------------------------------------------------------------
 printf '\n==================================================\n'
 printf 'Tests passed: %s\n' "$PASS_COUNT"
