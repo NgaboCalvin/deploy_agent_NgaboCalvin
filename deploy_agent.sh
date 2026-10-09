@@ -509,22 +509,41 @@ ask_thresholds() {
             ;;
     esac
 
+    # Keep asking until both values are valid, or until the user gives up and
+    # types "cancel" (or just presses Enter at an empty prompt).
     info ""
-    IFS= read -r -p "Enter the new warning threshold (0-100): " warning || return 0
-    if ! is_integer_in_range "$warning" 0 100; then
+    while true; do
+        IFS= read -r -p "Enter the new warning threshold (0-100), or 'cancel': " warning || return 0
+        case "$warning" in
+            cancel|CANCEL|Cancel)
+                info "Threshold update cancelled."
+                return 0
+                ;;
+        esac
+        if is_integer_in_range "$warning" 0 100; then
+            break
+        fi
         fail "'$warning' is not a percentage between 0 and 100."
-        return 1
-    fi
+    done
 
-    IFS= read -r -p "Enter the new failure threshold (0-100): " failure || return 0
-    if ! is_integer_in_range "$failure" 0 100; then
+    while true; do
+        IFS= read -r -p "Enter the new failure threshold (0-100), or 'cancel': " failure || return 0
+        case "$failure" in
+            cancel|CANCEL|Cancel)
+                info "Threshold update cancelled."
+                return 0
+                ;;
+        esac
+        if is_integer_in_range "$failure" 0 100; then
+            break
+        fi
         fail "'$failure' is not a percentage between 0 and 100."
-        return 1
-    fi
+    done
 
     if [ "$warning" -lt "$failure" ]; then
         fail "The warning threshold ($warning) is lower than the failure threshold ($failure)."
         fail "The warning alert is the less severe one, so warning must be >= failure."
+        info "Please run the update again with a warning value of $failure or higher."
         return 1
     fi
 
@@ -913,7 +932,8 @@ archive_single_log() {
         return 1
     fi
 
-    success "Archived: ${project_dir#$PWD/}/${base_name}_${stamp}.log"
+    # Print the full relative destination path, archives sub-directory included.
+    success "Archived: ${project_dir#$PWD/}/archives/$archive_subdir/${base_name}_${stamp}.log"
     return 0
 }
 

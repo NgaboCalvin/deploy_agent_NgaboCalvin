@@ -417,6 +417,50 @@ assert_eq "-rw-------" "$mode_after" "config.json stays chmod 600 after an updat
 if [ 60 -ge 60 ]; then pass "warning == failure is accepted"; else failed "warning == failure is accepted"; fi
 if [ 40 -ge 60 ]; then failed "warning < failure is rejected"; else pass "warning < failure is rejected"; fi
 
+# ask_thresholds must keep asking until both values are valid, then apply
+# them. The inputs below are deliberately wrong first: "abc", then 150 (out
+# of range), then a valid pair.
+WS_C2="$(new_workspace thresholds_reask)"
+cd "$WS_C2" || exit 1
+PROJ_C2="$WS_C2/attendance_tracker_reask"
+create_project_structure "$PROJ_C2" >/dev/null
+copy_templates "$PROJ_C2" >/dev/null
+CONFIG_C2="$PROJ_C2/Helpers/config.json"
+chmod 600 "$CONFIG_C2"
+
+ask_out="$(printf 'y\nabc\n150\n85\n60\n' | ask_thresholds "$CONFIG_C2" 2>&1)"
+ask_status=$?
+assert_eq "0" "$ask_status" "ask_thresholds succeeds once valid values are given"
+assert_contains "not a percentage between 0 and 100" "$ask_out" "a non-numeric threshold is rejected and re-asked"
+
+final_w="$(python3 -c "import json;print(json.load(open('$CONFIG_C2'))['thresholds']['warning'])")"
+final_f="$(python3 -c "import json;print(json.load(open('$CONFIG_C2'))['thresholds']['failure'])")"
+assert_eq "85" "$final_w" "the re-asked warning value is applied"
+assert_eq "60" "$final_f" "the re-asked failure value is applied"
+
+# Typing "cancel" must leave the defaults alone.
+WS_C3="$(new_workspace thresholds_cancel)"
+cd "$WS_C3" || exit 1
+PROJ_C3="$WS_C3/attendance_tracker_cancel"
+create_project_structure "$PROJ_C3" >/dev/null
+copy_templates "$PROJ_C3" >/dev/null
+CONFIG_C3="$PROJ_C3/Helpers/config.json"
+chmod 600 "$CONFIG_C3"
+
+printf 'y\ncancel\n' | ask_thresholds "$CONFIG_C3" >/dev/null 2>&1
+cancel_w="$(python3 -c "import json;print(json.load(open('$CONFIG_C3'))['thresholds']['warning'])")"
+assert_eq "75" "$cancel_w" "cancelling the update leaves the default warning threshold"
+
+# Declining the update must also keep the defaults.
+printf 'n\n' | ask_thresholds "$CONFIG_C3" >/dev/null 2>&1
+decline_w="$(python3 -c "import json;print(json.load(open('$CONFIG_C3'))['thresholds']['warning'])")"
+assert_eq "75" "$decline_w" "declining the update leaves the default warning threshold"
+
+# warning < failure must be refused by ask_thresholds.
+printf 'y\n40\n60\n' | ask_thresholds "$CONFIG_C3" >/dev/null 2>&1
+rel_w="$(python3 -c "import json;print(json.load(open('$CONFIG_C3'))['thresholds']['warning'])")"
+assert_eq "75" "$rel_w" "a warning below the failure threshold is not applied"
+
 # Corrupt input must be caught by the validator.
 BROKEN="$WS_C/broken.json"
 printf '{ "thresholds": { "warning": 80, } }' > "$BROKEN"
@@ -577,6 +621,11 @@ neither_out="$(printf 'neither\n' | { archive_logs_from_name neither; } 2>&1)"
 neither_status=$?
 assert_eq "0" "$neither_status" "archiving returns safely when no logs exist"
 assert_contains "no logs to archive" "$neither_out" "a clear message is shown when no logs exist"
+
+# H6: the printed destination must be the full relative path, including the
+# archives/<type>/ directory the file really went into.
+assert_contains "attendance_tracker_logs/archives/attendance/attendance_" "$both_out" "the full attendance archive path is printed"
+assert_contains "attendance_tracker_logs/archives/absent/absent_" "$both_out" "the full absent archive path is printed"
 
 # --------------------------------------------------------------------------
 section "I. Overwrite protection"
