@@ -826,6 +826,111 @@ kill -9 "$LIVE_PID" 2>/dev/null || true
 kill -9 "$LIVE_PID2" 2>/dev/null || true
 
 # --------------------------------------------------------------------------
+section "L. Ctrl+C and Ctrl+Z typed into a real terminal"
+# --------------------------------------------------------------------------
+
+# The tests above send signals with kill. This section goes one step further
+# and types an actual control character into a pseudo-terminal, which is what
+# pressing Ctrl+C or Ctrl+Z on a keyboard does. It needs Python's pty module,
+# which is part of the standard library on macOS and Linux.
+pty_driver="$WORK_DIR/pty_drive.py"
+
+write_pty_driver() {
+    # $1 = byte sequence to send as the interrupt key
+    cat > "$pty_driver" <<PYEOF
+import os, pty, time, select, sys
+
+SCRIPT = sys.argv[1]
+KEY = sys.argv[2].encode()
+
+pid, fd = pty.fork()
+if pid == 0:
+    # Run the real script directly as the foreground job of the pty.
+    os.execv("/bin/bash", ["/bin/bash", SCRIPT])
+
+out = b""
+phase = 0
+deadline = time.time() + 30
+
+def send(text):
+    os.write(fd, text.encode())
+    time.sleep(0.8)
+
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.25)
+    if ready:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+
+    if phase == 0 and b"Choose an option" in out:
+        send("1\n")
+        phase = 1
+    elif phase == 1 and b"project name" in out:
+        send("ptytest\n")
+        phase = 2
+    elif phase == 2 and b"Which roster" in out:
+        send("A\n")
+        phase = 3
+    elif phase == 3 and b"How many of them" in out:
+        time.sleep(0.3)
+        os.write(fd, KEY)      # the real Ctrl+C or Ctrl+Z character
+        phase = 4
+    elif phase == 4 and b"Exiting with status" in out:
+        time.sleep(0.8)
+        break
+
+try:
+    os.close(fd)
+except OSError:
+    pass
+try:
+    _, status = os.waitpid(pid, 0)
+except ChildProcessError:
+    status = 0
+
+sys.stdout.write(out.decode(errors="replace"))
+sys.stdout.write("\nPTY_EXIT=%d\n" % (status >> 8))
+PYEOF
+}
+
+if python3 -c "import pty" 2>/dev/null; then
+    write_pty_driver
+
+    # L1: Ctrl+C typed into the terminal during a deployment.
+    WS_L="$(new_workspace pty_ctrl_c)"
+    cd "$WS_L" || exit 1
+    c_out="$(python3 "$pty_driver" "$SCRIPT" $'\x03' 2>&1)"
+    assert_contains "DEPLOYMENT INTERRUPTED (SIGINT)" "$c_out" "Ctrl+C typed in a terminal interrupts the deployment"
+    assert_contains "PTY_EXIT=130" "$c_out" "Ctrl+C in a terminal exits with status 130"
+    assert_file_exists "$WS_L/attendance_tracker_ptytest_archive.zip" "Ctrl+C in a terminal creates the interruption zip"
+    if [ ! -d "$WS_L/attendance_tracker_ptytest" ]; then
+        pass "Ctrl+C in a terminal removes the incomplete directory"
+    else
+        failed "Ctrl+C in a terminal removes the incomplete directory"
+    fi
+
+    # L2: Ctrl+Z typed into the terminal does the same thing.
+    WS_M="$(new_workspace pty_ctrl_z)"
+    cd "$WS_M" || exit 1
+    z_out="$(python3 "$pty_driver" "$SCRIPT" $'\x1a' 2>&1)"
+    assert_contains "DEPLOYMENT INTERRUPTED (SIGTSTP)" "$z_out" "Ctrl+Z typed in a terminal interrupts the deployment"
+    assert_contains "PTY_EXIT=130" "$z_out" "Ctrl+Z in a terminal exits with status 130"
+    assert_file_exists "$WS_M/attendance_tracker_ptytest_archive.zip" "Ctrl+Z in a terminal creates the interruption zip"
+    if [ ! -d "$WS_M/attendance_tracker_ptytest" ]; then
+        pass "Ctrl+Z in a terminal removes the incomplete directory"
+    else
+        failed "Ctrl+Z in a terminal removes the incomplete directory"
+    fi
+else
+    printf '  [SKIP] Python pty module is unavailable, so the typed Ctrl+C/Ctrl+Z tests were not run.\n'
+fi
+
+# --------------------------------------------------------------------------
 printf '\n==================================================\n'
 printf 'Tests passed: %s\n' "$PASS_COUNT"
 printf 'Tests failed: %s\n' "$FAIL_COUNT"
