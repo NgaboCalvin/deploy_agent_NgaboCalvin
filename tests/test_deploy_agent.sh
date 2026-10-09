@@ -959,6 +959,51 @@ else
     printf '  [SKIP] Python pty module is unavailable, so the typed Ctrl+C/Ctrl+Z tests were not run.\n'
 fi
 
+# J1: if zip fails, the partial directory must survive. Deleting it would
+# destroy the only remaining copy of the work. A stub "zip" that always fails
+# is used, placed first on PATH just for this one call.
+WS_I1="$(new_workspace zipfail)"
+cd "$WS_I1" || exit 1
+mkdir -p "$WS_I1/fakebin"
+cat > "$WS_I1/fakebin/zip" <<'ZSTUB'
+#!/bin/sh
+echo "zip: simulated failure" >&2
+exit 3
+ZSTUB
+chmod +x "$WS_I1/fakebin/zip"
+mkdir -p "$WS_I1/attendance_tracker_zipfail/Helpers"
+printf 'important work\n' > "$WS_I1/attendance_tracker_zipfail/Helpers/keep.txt"
+
+zipfail_out="$(PATH="$WS_I1/fakebin:$PATH" archive_interrupted_deployment attendance_tracker_zipfail 2>&1)"
+zipfail_status=$?
+assert_eq "1" "$zipfail_status" "a failing zip makes the archive step return failure"
+assert_contains "KEPT" "$zipfail_out" "a failed archive reports that the directory was kept"
+if [ -f "$WS_I1/attendance_tracker_zipfail/Helpers/keep.txt" ]; then
+    pass "the partial directory survives a failed archive"
+else
+    failed "the partial directory survives a failed archive"
+fi
+
+# J2: if zip writes an empty or unreadable file, the directory must also
+# survive. A stub that exits 0 but produces nothing simulates that.
+cat > "$WS_I1/fakebin/zip" <<'ZSTUB2'
+#!/bin/sh
+exit 0
+ZSTUB2
+chmod +x "$WS_I1/fakebin/zip"
+mkdir -p "$WS_I1/attendance_tracker_emptyzip/Helpers"
+printf 'important work\n' > "$WS_I1/attendance_tracker_emptyzip/Helpers/keep.txt"
+
+empty_out="$(PATH="$WS_I1/fakebin:$PATH" archive_interrupted_deployment attendance_tracker_emptyzip 2>&1)"
+empty_status=$?
+assert_eq "1" "$empty_status" "an empty archive file makes the archive step return failure"
+assert_contains "KEPT" "$empty_out" "an empty archive reports that the directory was kept"
+if [ -f "$WS_I1/attendance_tracker_emptyzip/Helpers/keep.txt" ]; then
+    pass "the partial directory survives an empty archive file"
+else
+    failed "the partial directory survives an empty archive file"
+fi
+
 # --------------------------------------------------------------------------
 printf '\n==================================================\n'
 printf 'Tests passed: %s\n' "$PASS_COUNT"
