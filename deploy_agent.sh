@@ -398,3 +398,150 @@ generate_fresh_roster() {
     success "Generated $count new student rows with attendance and absence counts of 0"
     return 0
 }
+
+# --------------------------------------------------------------------------
+# Configuration updates
+# --------------------------------------------------------------------------
+
+# Validate the deployed config.json with Python's json module. I never trust a
+# sed edit without checking the result still parses.
+validate_config_json() {
+    local config_file="$1"
+
+    if python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$config_file" 2>/dev/null; then
+        return 0
+    fi
+
+    local error
+    error="$(python3 -c "import json,sys
+try:
+    json.load(open(sys.argv[1]))
+except Exception as exc:
+    print(exc)" "$config_file" 2>&1)"
+    fail "The deployed config.json is not valid JSON: $error"
+    return 1
+}
+
+# Edit the deployed config.json in place.
+#
+# macOS ships BSD sed, which needs an argument after -i ("sed -i ''"),
+# while GNU sed treats that argument as the script. I write the new file to a
+# temporary copy and move it over the original, which behaves identically on
+# both systems and keeps the rest of the file untouched.
+update_config_value() {
+    local config_file="$1"
+    local sed_script="$2"
+    local temp_file="$config_file.tmp.$$"
+
+    if ! sed -e "$sed_script" "$config_file" > "$temp_file" 2>/dev/null; then
+        rm -f "$temp_file"
+        fail "sed failed while updating $config_file"
+        return 1
+    fi
+
+    if [ ! -s "$temp_file" ]; then
+        rm -f "$temp_file"
+        fail "The sed edit produced an empty $config_file"
+        return 1
+    fi
+
+    # Moving a new file over the original resets its permissions, so I restore
+    # the owner-only mode the deployment set earlier.
+    if ! chmod 600 "$temp_file"; then
+        rm -f "$temp_file"
+        fail "Could not set permissions on the updated config copy"
+        return 1
+    fi
+
+    if ! mv "$temp_file" "$config_file"; then
+        rm -f "$temp_file"
+        fail "Could not replace $config_file with the updated copy"
+        return 1
+    fi
+    return 0
+}
+
+# Only the lines that hold the warning and failure numbers are rewritten, so
+# the formatting and key order of the template survive.
+update_thresholds() {
+    local config_file="$1"
+    local warning="$2"
+    local failure="$3"
+
+    if ! update_config_value "$config_file" '/"warning"/s/[0-9][0-9]*/'"$warning"'/'; then
+        return 1
+    fi
+    if ! update_config_value "$config_file" '/"failure"/s/[0-9][0-9]*/'"$failure"'/'; then
+        return 1
+    fi
+
+    if ! validate_config_json "$config_file"; then
+        fail "Threshold update produced an invalid config.json, keeping the previous version."
+        return 1
+    fi
+    success "Updated thresholds: warning=$warning, failure=$failure"
+    return 0
+}
+
+# The sample roster already holds four sessions per student, so the next
+# session is session five. A fresh roster has nothing recorded, so it is
+# session one. Setting the wrong value here would make the application print
+# a mismatch note for every single student.
+set_total_sessions() {
+    local config_file="$1"
+    local sessions="$2"
+
+    if ! update_config_value "$config_file" '/"total_sessions"/s/[0-9][0-9]*/'"$sessions"'/'; then
+        return 1
+    fi
+    if ! validate_config_json "$config_file"; then
+        fail "Could not set total_sessions, keeping the previous version."
+        return 1
+    fi
+    success "Set total_sessions to $sessions"
+    return 0
+}
+
+# Ask the instructor whether to change the alert thresholds, and keep asking
+# until the values are valid or the user backs out.
+ask_thresholds() {
+    local config_file="$1"
+    local answer warning failure
+
+    info ""
+    info "Default alert thresholds: warning=75, failure=50."
+    info "  - A student below the warning threshold triggers a WARNING alert."
+    info "  - A student below the failure threshold triggers a URGENT alert."
+    info "  - The warning threshold is the less severe alert, so warning should be"
+    info "    greater than or equal to failure."
+    IFS= read -r -p "Do you want to update these thresholds? [y/N]: " answer || return 0
+
+    case "$answer" in
+        [yY]|[yY][eE][sS]) ;;
+        *)
+            success "Keeping the deployed default thresholds."
+            return 0
+            ;;
+    esac
+
+    info ""
+    IFS= read -r -p "Enter the new warning threshold (0-100): " warning || return 0
+    if ! is_integer_in_range "$warning" 0 100; then
+        fail "'$warning' is not a percentage between 0 and 100."
+        return 1
+    fi
+
+    IFS= read -r -p "Enter the new failure threshold (0-100): " failure || return 0
+    if ! is_integer_in_range "$failure" 0 100; then
+        fail "'$failure' is not a percentage between 0 and 100."
+        return 1
+    fi
+
+    if [ "$warning" -lt "$failure" ]; then
+        fail "The warning threshold ($warning) is lower than the failure threshold ($failure)."
+        fail "The warning alert is the less severe one, so warning must be >= failure."
+        return 1
+    fi
+
+    update_thresholds "$config_file" "$warning" "$failure"
+}
