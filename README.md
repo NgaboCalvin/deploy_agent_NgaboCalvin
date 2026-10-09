@@ -284,6 +284,25 @@ filename and the second would overwrite the first. The script checks whether
 the destination already exists and, if it does, appends `_1`, then `_2`, and
 so on. The timestamp pattern is kept intact and no archive is ever lost.
 
+## What triggers archiving
+
+Two different things create archives, and it is worth being clear about which
+is which.
+
+**Menu option 3** is the normal path. It runs when I choose it, and it copies
+`reports/attendance.log` and `reports/absent.log` into the timestamped archive
+directories. It only ever runs after a marking session, because the
+application is what creates those logs in the first place.
+
+**A signal during deployment** is the exception. Pressing Ctrl+C or Ctrl+Z
+while option 1 is still creating files does not archive attendance data,
+because there is none yet. It zips whatever partial project exists so the work
+is not lost, and names that file `<project>_archive.zip` rather than putting it
+in `archives/`. That file is not a session log and is never treated as one.
+
+So the trigger for a session archive is: *I picked option 3*. The trigger for
+the interruption ZIP is: *a deployment was cut short before it finished*.
+
 ## What happens when one or both logs are missing
 
 Neither log is assumed to exist.
@@ -608,8 +627,27 @@ Things I could not verify here:
 
 ## Demonstration video
 
-I plan to show the menu, one full deployment using the sample roster, one
-using the fresh roster, a threshold update, log archival, and a Ctrl+C during
-deployment that produces the interruption ZIP.
+The rubric asks the video to explain my approach and the logic behind each
+section, and to include a short live marking session plus an interruption
+demo. My recording plan, in order:
+
+1. **Approach (about 1 min).** Why a shell script at all, and the three
+   features: deploy, run, archive.
+2. **Dependency and structure (about 1 min).** Run option 1 and show the
+   `python3 --version` and `zip` checks, the project name prompt, and the
+   directory tree that gets created.
+3. **Both roster paths (about 2 min).** Option A with the sample roster,
+   showing `total_sessions` becomes 5 because the sample has four prior
+   sessions. Then a second deployment using option B, showing counts start at
+   zero and `total_sessions` becomes 1.
+4. **Permissions and thresholds (about 1 min).** `ls -l` showing `-rwxr-xr-x`
+   and `-rw-------`, then a threshold update and the config file afterwards.
+5. **Live marking session (about 2 min).** Actually marking students present
+   and absent, and showing the roster counts and `reports/` logs changing.
+6. **Archiving (about 1 min).** Option 3, then `find` to show the timestamped
+   archive files and the originals still in `reports/`.
+7. **Interruption (about 1 min).** Start a deployment and press Ctrl+C at the
+   "How many of them should I copy?" prompt. Show the interrupted message, the
+   `unzip -l` output, and that the incomplete directory is gone.
 
 Demonstration video: [Paste my video link here]
