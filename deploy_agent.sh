@@ -545,3 +545,516 @@ ask_thresholds() {
 
     update_thresholds "$config_file" "$warning" "$failure"
 }
+
+# --------------------------------------------------------------------------
+# Signal handling for an in-progress deployment
+# --------------------------------------------------------------------------
+
+# Archive an interrupted deployment into <project>_archive.zip and remove the
+# incomplete directory only once the archive is confirmed good.
+#
+# $1 is the incomplete directory name (relative to the working directory).
+archive_interrupted_deployment() {
+    local dir_name="$1"
+    local project_dir="$PWD/$dir_name"
+    local archive_file="$PWD/${dir_name}_archive.zip"
+
+    warn "Deployment was interrupted. Archiving the partial project..."
+    info "  Incomplete directory: $dir_name"
+    info "  Archive file:        ${dir_name}_archive.zip"
+
+    if [ ! -d "$project_dir" ]; then
+        warn "No partial directory was created, so there is nothing to archive."
+        return 0
+    fi
+
+    # -r recurses into the sub-directories, and -j/-x are not used so the
+    # archive simply contains everything that was created so far.
+    if ! zip -r -q "$archive_file" "$dir_name"; then
+        fail "zip failed, so the partial directory $dir_name was KEPT."
+        fail "Nothing was deleted: it is still the only copy of that work."
+        return 1
+    fi
+
+    # Do not trust the exit status alone: confirm a readable zip file appeared.
+    if [ ! -s "$archive_file" ]; then
+        fail "The archive $archive_file is missing or empty."
+        fail "The partial directory $dir_name was KEPT for safety."
+        return 1
+    fi
+    if ! unzip -l "$archive_file" >/dev/null 2>&1; then
+        fail "The archive $archive_file is not a readable zip file."
+        fail "The partial directory $dir_name was KEPT for safety."
+        return 1
+    fi
+
+    success "Archived the partial project to ${dir_name}_archive.zip"
+
+    # The rubric requires the incomplete directory to be removed, but only
+    # after the archive is known to be good.
+    if ! rm -rf "$project_dir"; then
+        fail "Could not remove the incomplete directory $dir_name"
+        return 1
+    fi
+    success "Removed the incomplete directory $dir_name"
+    return 0
+}
+
+# Shared handler for SIGINT and SIGTSTP.
+#
+# DEPLOY_IN_PROGRESS guards this: when it is "no" the signal belonged to the
+# menu or to the interactive Python session, so the handler stays out of the
+# way and lets the default behaviour happen.
+handle_deployment_interrupt() {
+    local signal_name="$1"
+
+    # Disable the handler first so a second Ctrl+C cannot re-enter this code
+    # while the archive is being written.
+    trap - INT
+    trap - TSTP
+
+    if [ "$DEPLOY_IN_PROGRESS" != "yes" ] || [ -z "$CURRENT_DEPLOY_DIR" ]; then
+        info ""
+        warn "Received $signal_name outside of a deployment, ignoring."
+        return 0
+    fi
+
+    info ""
+    info "=================================================="
+    warn "DEPLOYMENT INTERRUPTED ($signal_name)"
+    info "=================================================="
+
+    local dir_name="$CURRENT_DEPLOY_DIR"
+    # Clear the state first so cleanup cannot run twice.
+    DEPLOY_IN_PROGRESS="no"
+    CURRENT_DEPLOY_DIR=""
+
+    if archive_interrupted_deployment "$dir_name"; then
+        info ""
+        info "Cleanup finished. Exiting with status $INTERRUPT_STATUS."
+        exit "$INTERRUPT_STATUS"
+    fi
+
+    fail "Interrupted deployment could not be archived cleanly."
+    info "Please look at $dir_name or ${dir_name}_archive.zip before deleting anything."
+    exit 1
+}
+
+# Install the deployment traps. They are removed again by
+# remove_deployment_traps once the deployment finishes.
+install_deployment_traps() {
+    trap 'handle_deployment_interrupt SIGINT'  INT
+    trap 'handle_deployment_interrupt SIGTSTP' TSTP
+}
+
+remove_deployment_traps() {
+    trap - INT
+    trap - TSTP
+    DEPLOY_IN_PROGRESS="no"
+    CURRENT_DEPLOY_DIR=""
+}
+
+# --------------------------------------------------------------------------
+# Feature 1: deploy a new project
+# --------------------------------------------------------------------------
+
+# Ask for the project name and return the directory name that will be used.
+# The full path is only assembled by the caller from "$PWD" and this name.
+ask_for_project_name() {
+    local name
+
+    info ""
+    info "The project directory will be named ${PROJECT_PREFIX}<name>"
+    while true; do
+        IFS= read -r -p "Enter the project name: " name || return 1
+        if validate_project_name "$name"; then
+            printf '%s' "$name"
+            return 0
+        fi
+    done
+}
+
+# Decide what to do when the destination already exists. Prints "yes" or "no".
+# Returning "no" means: leave the existing project completely untouched.
+confirm_overwrite() {
+    local project_dir="$1"
+    local answer
+
+    info ""
+    warn "A project already exists at: $project_dir"
+    info "Replacing it will permanently remove:"
+    info "  $project_dir/Helpers/     (roster and configuration)"
+    info "  $project_dir/reports/     (recorded logs)"
+    info "  $project_dir/archives/    (archived logs)"
+    info "  $project_dir/attendance_checker.py"
+    info "Nothing outside $project_dir will be touched."
+    IFS= read -r -p "Replace it with a fresh deployment? [y/N]: " answer || answer="n"
+
+    case "$answer" in
+        [yY]|[yY][eE][sS]) printf 'yes' ;;
+        *) printf 'no' ;;
+    esac
+}
+
+deploy_project() {
+    local project_name project_dir dir_name sessions
+
+    banner "Deploy a new attendance tracker project"
+
+    if ! check_dependencies; then
+        return 1
+    fi
+    if ! check_templates; then
+        return 1
+    fi
+
+    project_name="$(ask_for_project_name)" || return 1
+    if [ -z "$project_name" ]; then
+        fail "No project name was given."
+        return 1
+    fi
+
+    dir_name="${PROJECT_PREFIX}${project_name}"
+    project_dir="$PWD/$dir_name"
+
+    if [ -e "$project_dir" ]; then
+        local decision
+        decision="$(confirm_overwrite "$project_dir")"
+        if [ "$decision" != "yes" ]; then
+            info ""
+            success "Keeping the existing project unchanged. Nothing was deployed."
+            return 0
+        fi
+        # Only now, after an explicit yes, is anything removed. The path was
+        # built from a validated name, so it is always a child of this
+        # directory and can never be the repository itself.
+        if ! rm -rf "$project_dir"; then
+            fail "Could not remove the existing project directory: $project_dir"
+            return 1
+        fi
+        success "Removed the previous $dir_name"
+    fi
+
+    # From here on a Ctrl+C or Ctrl+Z must clean up a partial deployment.
+    CURRENT_DEPLOY_DIR="$dir_name"
+    DEPLOY_IN_PROGRESS="yes"
+    install_deployment_traps
+
+    if ! create_project_structure "$project_dir"; then
+        remove_deployment_traps
+        return 1
+    fi
+
+    if ! copy_templates "$project_dir"; then
+        remove_deployment_traps
+        return 1
+    fi
+
+    # The roster choice decides the session count, so ask before the config is
+    # edited.
+    info ""
+    info "Which roster should this project use?"
+    info "  A) Copy students from the supplied sample roster"
+    info "  B) Generate a fresh roster from built-in sample names"
+    local choice
+    while true; do
+        IFS= read -r -p "Choose A or B: " choice || { remove_deployment_traps; return 1; }
+        case "$choice" in
+            [aA]) sessions=5; break ;;
+            [bB]) sessions=1; break ;;
+            *) fail "Please enter A or B." ;;
+        esac
+    done
+
+    local roster_ok="no"
+    if [ "$sessions" -eq 5 ]; then
+        if copy_sample_roster "$project_dir"; then
+            roster_ok="yes"
+        fi
+    else
+        if generate_fresh_roster "$project_dir"; then
+            roster_ok="yes"
+        fi
+    fi
+
+    if [ "$roster_ok" != "yes" ]; then
+        fail "Could not build the roster, so the deployment is incomplete."
+        remove_deployment_traps
+        return 1
+    fi
+
+    if ! set_total_sessions "$project_dir/Helpers/config.json" "$sessions"; then
+        remove_deployment_traps
+        return 1
+    fi
+
+    if ! ask_thresholds "$project_dir/Helpers/config.json"; then
+        fail "Threshold update was cancelled with an invalid value. Keeping the defaults."
+    fi
+
+    if ! apply_permissions "$project_dir"; then
+        remove_deployment_traps
+        return 1
+    fi
+
+    # Deployment is finished, so take the handlers back off before the
+    # interactive application runs.
+    remove_deployment_traps
+
+    banner "Deployment complete"
+    info "Project directory: $dir_name"
+    info ""
+    info "Directory structure:"
+    info "  $dir_name/attendance_checker.py"
+    info "  $dir_name/Helpers/assets.csv"
+    info "  $dir_name/Helpers/config.json"
+    info "  $dir_name/reports/        (empty until a session is recorded)"
+    info "  $dir_name/archives/attendance/"
+    info "  $dir_name/archives/absent/"
+    info ""
+
+    # The assignment requires the deployment flow to finish by running the
+    # real application from inside the new project.
+    run_application_in_dir "$project_dir"
+    return $?
+}
+
+# --------------------------------------------------------------------------
+# Feature 2: run an already deployed project
+# --------------------------------------------------------------------------
+
+# Launch the genuine application from inside a project directory. I use a
+# subshell with cd so the menu keeps working from the repository root when
+# the program exits.
+run_application_in_dir() {
+    local project_dir="$1"
+
+    info ""
+    info "Starting the attendance checker in $project_dir"
+    info "Mark each student with 'P' for present or 'A' for absent."
+    info ""
+
+    ( cd "$project_dir" && python3 attendance_checker.py )
+    local status=$?
+
+    info ""
+    if [ "$status" -eq 0 ]; then
+        success "The attendance checker finished normally."
+    else
+        fail "The attendance checker exited with status $status."
+        info "Common causes: no input available, or the roster was left mid-session."
+    fi
+    return "$status"
+}
+
+# Ask for a project name and confirm the three files the application needs.
+run_application() {
+    local project_name project_dir dir_name
+
+    banner "Run an existing attendance tracker project"
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        fail "python3 is not installed, so the project cannot be started."
+        return 1
+    fi
+
+    dir_name="$(ask_for_project_name)" || return 1
+    if [ -z "$dir_name" ]; then
+        fail "No project name was given."
+        return 1
+    fi
+    project_dir="$PWD/$dir_name"
+
+    if [ ! -d "$project_dir" ]; then
+        fail "No project directory found at: $project_dir"
+        info "Use option 1 to deploy it first."
+        return 1
+    fi
+
+    # Check each required file separately so the error names the missing one.
+    local required
+    for required in "attendance_checker.py" "Helpers/assets.csv" "Helpers/config.json"; do
+        if [ ! -f "$project_dir/$required" ]; then
+            fail "The project $dir_name is incomplete: $required is missing."
+            info "Expected at: $project_dir/$required"
+            return 1
+        fi
+    done
+
+    success "All required files are present in $dir_name"
+    run_application_in_dir "$project_dir"
+}
+
+# --------------------------------------------------------------------------
+# Feature 3: archive generated logs
+# --------------------------------------------------------------------------
+
+# A timestamp that matches the required YYYYMMDD_HHMMSS pattern.
+timestamp_now() {
+    date '+%Y%m%d_%H%M%S'
+}
+
+# Copy one log into its archive directory without overwriting an existing file.
+# Two archive runs inside the same second would otherwise produce the same
+# name, so a numeric suffix is appended to the next one.
+archive_single_log() {
+    local project_dir="$1"
+    local source_file="$2"
+    local archive_subdir="$3"
+    local base_name="$4"
+    local stamp="$5"
+
+    local archive_dir="$project_dir/archives/$archive_subdir"
+    if ! mkdir -p "$archive_dir"; then
+        fail "Could not create archive directory: $archive_dir"
+        return 1
+    fi
+
+    local destination="$archive_dir/${base_name}_${stamp}.log"
+    local suffix=1
+    while [ -e "$destination" ]; do
+        destination="$archive_dir/${base_name}_${stamp}_${suffix}.log"
+        suffix=$((suffix + 1))
+    done
+
+    # cp keeps the original reports/ log untouched, as the assignment requires.
+    if ! cp "$source_file" "$destination"; then
+        fail "Could not archive $source_file"
+        return 1
+    fi
+
+    success "Archived: $dir_relative/${base_name}_${stamp}.log"
+    return 0
+}
+
+archive_logs() {
+    local project_name project_dir dir_name dir_relative stamp
+
+    banner "Archive generated logs"
+
+    project_name="$(ask_for_project_name)" || return 1
+    if [ -z "$project_name" ]; then
+        fail "No project name was given."
+        return 1
+    fi
+    dir_name="${PROJECT_PREFIX}${project_name}"
+    project_dir="$PWD/$dir_name"
+    dir_relative="$dir_name"
+
+    if [ ! -d "$project_dir" ]; then
+        fail "No project directory found at: $project_dir"
+        return 1
+    fi
+
+    local attendance_log="$project_dir/reports/attendance.log"
+    local absent_log="$project_dir/reports/absent.log"
+    local found=0
+    local archived=0
+
+    # Either log may be missing. A session with no absences produces no
+    # absent.log at all, so that is a normal case and not an error.
+    if [ ! -f "$attendance_log" ]; then
+        warn "No attendance.log found in $dir_name/reports/ - skipping it."
+    fi
+    if [ ! -f "$absent_log" ]; then
+        warn "No absent.log found in $dir_name/reports/ - skipping it."
+    fi
+
+    if [ ! -f "$attendance_log" ] && [ ! -f "$absent_log" ]; then
+        info ""
+        info "There are no logs to archive in $dir_name."
+        info "Run the attendance checker once so it can create reports/attendance.log."
+        return 0
+    fi
+
+    stamp="$(timestamp_now)"
+    info ""
+    info "Using timestamp: $stamp"
+
+    if [ -f "$attendance_log" ]; then
+        found=1
+        if archive_single_log "$project_dir" "$attendance_log" "attendance" "attendance" "$stamp"; then
+            archived=$((archived + 1))
+        else
+            fail "attendance.log was not archived."
+        fi
+    fi
+
+    if [ -f "$absent_log" ]; then
+        found=1
+        if archive_single_log "$project_dir" "$absent_log" "absent" "absent" "$stamp"; then
+            archived=$((archived + 1))
+        else
+            fail "absent.log was not archived."
+        fi
+    fi
+
+    info ""
+    if [ "$found" -eq 1 ] && [ "$archived" -gt 0 ]; then
+        success "Archived $archived log(s). The original files in reports/ were kept."
+        return 0
+    fi
+    fail "No logs could be archived."
+    return 1
+}
+
+# --------------------------------------------------------------------------
+# Menu
+# --------------------------------------------------------------------------
+
+show_menu() {
+    printf '\n'
+    printf '%s\n' "=================================================="
+    printf '%s\n' "  Attendance Tracker Deployment Agent"
+    printf '%s\n' "=================================================="
+    printf '%s\n' "  1. Deploy a new project"
+    printf '%s\n' "  2. Run an existing project"
+    printf '%s\n' "  3. Archive generated logs"
+    printf '%s\n' "  4. Exit"
+    printf '%s\n' "=================================================="
+}
+
+main() {
+    local choice status
+
+    # No traps are installed at menu level on purpose: outside a deployment
+    # Ctrl+C should simply end the script as usual.
+    while true; do
+        show_menu
+        IFS= read -r -p "Choose an option (1-4): " choice || {
+            info ""
+            info "Goodbye."
+            return 0
+        }
+
+        case "$choice" in
+            1)
+                deploy_project
+                status=$?
+                if [ "$status" -ne 0 ]; then
+                    fail "The deployment did not complete (status $status)."
+                fi
+                pause
+                ;;
+            2)
+                run_application
+                pause
+                ;;
+            3)
+                archive_logs
+                pause
+                ;;
+            4|q|Q|exit|quit)
+                info ""
+                info "Goodbye."
+                return 0
+                ;;
+            *)
+                fail "'$choice' is not one of the menu options."
+                pause
+                ;;
+        esac
+    done
+}
+
+main "$@"
