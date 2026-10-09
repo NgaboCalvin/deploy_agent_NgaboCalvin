@@ -1004,6 +1004,29 @@ else
     failed "the partial directory survives an empty archive file"
 fi
 
+# I3: run_application and archive_logs must reject a project that does not
+# exist, and must refuse to leave the current directory.
+WS_R="$(new_workspace missing_project)"
+cd "$WS_R" || exit 1
+pwd_before="$PWD"
+
+run_out="$(printf 'ghost\n' | run_application 2>&1)"
+run_code=$?
+assert_eq "1" "$run_code" "run_application fails for a project that does not exist"
+assert_contains "No project directory found" "$run_out" "run_application names the missing directory"
+
+arch_out="$(printf 'ghost\n' | archive_logs 2>&1)"
+arch_code=$?
+assert_eq "1" "$arch_code" "archive_logs fails for a project that does not exist"
+assert_contains "No project directory found" "$arch_out" "archive_logs names the missing directory"
+
+# A traversal attempt must be rejected at the prompt and never escape.
+trav_out="$(printf '../../etc\n' | archive_logs 2>&1)"
+trav_code=$?
+assert_eq "1" "$trav_code" "a traversal attempt in archive_logs is rejected"
+assert_contains "Invalid project name" "$trav_out" "a traversal attempt is reported as an invalid name"
+assert_eq "$pwd_before" "$PWD" "the working directory is unchanged after a rejected name"
+
 # --------------------------------------------------------------------------
 printf '\n==================================================\n'
 printf 'Tests passed: %s\n' "$PASS_COUNT"

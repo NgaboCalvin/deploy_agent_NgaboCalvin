@@ -465,6 +465,13 @@ report "No such file or directory" because the directory was removed.
 
 Ctrl+Z does the same thing here rather than suspending the process.
 
+One honest limitation: the handler can only act on a signal that actually
+reaches the script. While it is blocked in `read` waiting for a prompt, Ctrl+C
+and Ctrl+Z are delivered normally and the handler runs, which is why the
+prompt above is the reliable place to test this. Outside the deployment window
+the traps are removed entirely, so Ctrl+Z at the menu suspends the script as
+usual and `fg` brings it back.
+
 ## How to inspect file permissions
 
 ```bash
@@ -540,7 +547,7 @@ that window Ctrl+Z keeps its normal meaning.
 ## Testing results
 
 I ran `bash tests/test_deploy_agent.sh` on macOS with Bash 3.2.57 and Python
-3.9.6. All 118 checks passed.
+3.9.6. All 137 checks passed.
 
 What that covers:
 
@@ -581,6 +588,13 @@ What that covers:
   the directory, and exit 130.
 - Ctrl+C while no deployment is in progress leaves existing projects
   untouched.
+- A deployment that fails part way through also archives and cleans up its
+  partial directory, rather than leaving a half-built project behind.
+- When `zip` fails, or writes an empty file, the partial project is kept and
+  the script says so instead of deleting the only copy.
+- `run_application` and `archive_logs` both fail cleanly for a project that
+  does not exist, and a `../../etc` style name is rejected at the prompt with
+  the working directory left unchanged.
 
 Things I could not verify here:
 
