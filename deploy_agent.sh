@@ -104,21 +104,6 @@ validate_project_name() {
     return 0
 }
 
-# Accept only a whole number, with no sign and no spaces.
-is_positive_integer() {
-    local value="$1"
-    case "$value" in
-        ''|*[!0-9]*)
-            return 1
-            ;;
-    esac
-    # Reject zero: every count I ask for must be at least 1.
-    if [ "$value" -eq 0 ] 2>/dev/null; then
-        return 1
-    fi
-    return 0
-}
-
 # Accept a whole number between min and max inclusive.
 is_integer_in_range() {
     local value="$1" min="$2" max="$3"
@@ -658,27 +643,30 @@ remove_deployment_traps() {
 # Feature 1: deploy a new project
 # --------------------------------------------------------------------------
 
-# Ask for the project name and return the directory name that will be used.
-# The full path is only assembled by the caller from "$PWD" and this name.
+# Ask the user for the project name and store it in PROJECT_NAME_CHOICE.
+#
+# I use a global variable rather than printing the answer, because the prompt
+# messages and the answer would otherwise end up mixed together in the output.
 ask_for_project_name() {
-    local name
+    PROJECT_NAME_CHOICE=""
 
     info ""
     info "The project directory will be named ${PROJECT_PREFIX}<name>"
     while true; do
-        IFS= read -r -p "Enter the project name: " name || return 1
-        if validate_project_name "$name"; then
-            printf '%s' "$name"
+        IFS= read -r -p "Enter the project name: " PROJECT_NAME_CHOICE || return 1
+        if validate_project_name "$PROJECT_NAME_CHOICE"; then
             return 0
         fi
     done
 }
 
-# Decide what to do when the destination already exists. Prints "yes" or "no".
-# Returning "no" means: leave the existing project completely untouched.
+# Ask whether an existing project may be replaced. The answer is stored in
+# OVERWRITE_CHOICE ("yes" or "no") for the same reason as above.
 confirm_overwrite() {
     local project_dir="$1"
     local answer
+
+    OVERWRITE_CHOICE="no"
 
     info ""
     warn "A project already exists at: $project_dir"
@@ -688,12 +676,13 @@ confirm_overwrite() {
     info "  $project_dir/archives/    (archived logs)"
     info "  $project_dir/attendance_checker.py"
     info "Nothing outside $project_dir will be touched."
-    IFS= read -r -p "Replace it with a fresh deployment? [y/N]: " answer || answer="n"
+    IFS= read -r -p "Replace it with a fresh deployment? [y/N]: " answer || return 0
 
     case "$answer" in
-        [yY]|[yY][eE][sS]) printf 'yes' ;;
-        *) printf 'no' ;;
+        [yY]|[yY][eE][sS]) OVERWRITE_CHOICE="yes" ;;
+        *) OVERWRITE_CHOICE="no" ;;
     esac
+    return 0
 }
 
 deploy_project() {
@@ -708,7 +697,8 @@ deploy_project() {
         return 1
     fi
 
-    project_name="$(ask_for_project_name)" || return 1
+    ask_for_project_name || return 1
+    project_name="$PROJECT_NAME_CHOICE"
     if [ -z "$project_name" ]; then
         fail "No project name was given."
         return 1
@@ -718,9 +708,8 @@ deploy_project() {
     project_dir="$PWD/$dir_name"
 
     if [ -e "$project_dir" ]; then
-        local decision
-        decision="$(confirm_overwrite "$project_dir")"
-        if [ "$decision" != "yes" ]; then
+        confirm_overwrite "$project_dir"
+        if [ "$OVERWRITE_CHOICE" != "yes" ]; then
             info ""
             success "Keeping the existing project unchanged. Nothing was deployed."
             return 0
@@ -858,8 +847,9 @@ run_application() {
         return 1
     fi
 
-    dir_name="$(ask_for_project_name)" || return 1
-    if [ -z "$dir_name" ]; then
+    ask_for_project_name || return 1
+    dir_name="${PROJECT_PREFIX}${PROJECT_NAME_CHOICE}"
+    if [ -z "$dir_name" ] || [ "$dir_name" = "$PROJECT_PREFIX" ]; then
         fail "No project name was given."
         return 1
     fi
@@ -923,23 +913,22 @@ archive_single_log() {
         return 1
     fi
 
-    success "Archived: $dir_relative/${base_name}_${stamp}.log"
+    success "Archived: ${project_dir#$PWD/}/${base_name}_${stamp}.log"
     return 0
 }
 
 archive_logs() {
-    local project_name project_dir dir_name dir_relative stamp
+    local project_dir dir_name stamp
 
     banner "Archive generated logs"
 
-    project_name="$(ask_for_project_name)" || return 1
-    if [ -z "$project_name" ]; then
+    ask_for_project_name || return 1
+    if [ -z "$PROJECT_NAME_CHOICE" ]; then
         fail "No project name was given."
         return 1
     fi
-    dir_name="${PROJECT_PREFIX}${project_name}"
+    dir_name="${PROJECT_PREFIX}${PROJECT_NAME_CHOICE}"
     project_dir="$PWD/$dir_name"
-    dir_relative="$dir_name"
 
     if [ ! -d "$project_dir" ]; then
         fail "No project directory found at: $project_dir"
