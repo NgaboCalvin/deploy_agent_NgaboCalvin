@@ -547,7 +547,7 @@ that window Ctrl+Z keeps its normal meaning.
 ## Testing results
 
 I ran `bash tests/test_deploy_agent.sh` on macOS with Bash 3.2.57 and Python
-3.9.6. All 137 checks passed.
+3.9.6. All 144 checks passed.
 
 What that covers:
 

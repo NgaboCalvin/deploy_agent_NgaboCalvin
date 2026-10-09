@@ -293,6 +293,60 @@ SAMPLE_EMAILS=(
 # How many sample records the generate option can supply.
 MAX_FRESH_STUDENTS="${#SAMPLE_NAMES[@]}"
 
+# Check that a value is safe to write straight into the roster CSV.
+#
+# The application reads the roster with Python's csv module, so a comma, a
+# double quote or a newline inside a name would either shift the columns or
+# split one row into two. Rather than silently produce a broken file, I refuse
+# any value containing one of those and explain why.
+is_csv_safe_value() {
+    local value="$1" label="$2"
+
+    case "$value" in
+        *','*)
+            fail "The $label '$value' contains a comma, which would break the CSV columns."
+            return 1
+            ;;
+        *'"'*)
+            fail "The $label '$value' contains a double quote, which would break the CSV."
+            return 1
+            ;;
+    esac
+
+    # A space is fine in a name, but a tab, newline or carriage return would
+    # either break the row or produce stray whitespace in a cell.
+    if printf '%s' "$value" | grep -q '[[:cntrl:]]'; then
+        fail "The $label '$value' contains a control character, which would break the CSV."
+        return 1
+    fi
+
+    return 0
+}
+
+# Confirm the whole built-in sample pool is safe before offering option B.
+check_sample_data() {
+    local index
+    for ((index = 0; index < MAX_FRESH_STUDENTS; index++)); do
+        if ! is_csv_safe_value "${SAMPLE_NAMES[$index]}" "student name"; then
+            return 1
+        fi
+        if ! is_csv_safe_value "${SAMPLE_EMAILS[$index]}" "email address"; then
+            return 1
+        fi
+    done
+
+    # Duplicate emails would make the roster ambiguous, so check for them.
+    local duplicates
+    duplicates="$(printf '%s\n' "${SAMPLE_EMAILS[@]}" | sort | uniq -d)"
+    if [ -n "$duplicates" ]; then
+        fail "The built-in sample data contains duplicate email addresses:"
+        printf '%s\n' "$duplicates" >&2
+        return 1
+    fi
+
+    return 0
+}
+
 # Count the student rows in templates/assets.csv (the header is not a student).
 count_sample_students() {
     local rows
@@ -348,6 +402,13 @@ generate_fresh_roster() {
     local project_dir="$1"
     local count index
 
+    # Refuse to write anything if the built-in data itself would produce a
+    # malformed roster.
+    if ! check_sample_data; then
+        fail "The built-in sample data cannot be used safely."
+        return 1
+    fi
+
     info "I can generate up to $MAX_FRESH_STUDENTS students from built-in sample names."
     info "How many students would you like? (1-$MAX_FRESH_STUDENTS)"
 
@@ -364,7 +425,7 @@ generate_fresh_roster() {
         printf 'Email,Names,Attendance Count,Absence Count\n'
         index=0
         while [ "$index" -lt "$count" ]; do
-            # The sample names contain no comma, quote or newline, so writing
+            # The names were checked with is_csv_safe_value above, so writing
             # them straight into the CSV cannot break the file structure.
             printf '%s,%s,0,0\n' "${SAMPLE_EMAILS[$index]}" "${SAMPLE_NAMES[$index]}"
             index=$((index + 1))
@@ -373,6 +434,20 @@ generate_fresh_roster() {
         fail "Could not write the new roster to $target"
         return 1
     }
+
+    # The header plus N rows means N+1 lines and exactly 4 columns per row.
+    local line_count
+    line_count="$(wc -l < "$target" | tr -d ' ')"
+    if [ "$line_count" != "$((count + 1))" ]; then
+        fail "Roster check failed: expected $((count + 1)) lines, found $line_count."
+        return 1
+    fi
+    local bad_columns
+    bad_columns="$(awk -F, 'NF != 4 {print NR}' "$target" | wc -l | tr -d ' ')"
+    if [ "$bad_columns" != "0" ]; then
+        fail "Roster check failed: $bad_columns row(s) do not have the expected 4 columns."
+        return 1
+    fi
 
     local written
     written="$(awk 'NR > 1 && NF > 0' "$target" | wc -l | tr -d ' ')"

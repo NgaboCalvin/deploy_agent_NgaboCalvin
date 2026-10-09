@@ -379,6 +379,35 @@ else
 fi
 printf '  [INFO] built-in sample pool supports up to %s students\n' "$MAX_FRESH_STUDENTS"
 
+# The built-in sample data must itself be safe to write into a CSV.
+if check_sample_data >/dev/null 2>&1; then
+    pass "the built-in sample names and emails are CSV-safe and unique"
+else
+    failed "the built-in sample names and emails are CSV-safe and unique"
+fi
+
+# Values that would break the CSV must be rejected.
+for unsafe_value in "Smith, John" 'John"Smith' "Tab	Here"; do
+    if is_csv_safe_value "$unsafe_value" "test value"; then
+        failed "CSV-unsafe value '$unsafe_value' is rejected"
+    else
+        pass "CSV-unsafe value '$unsafe_value' is rejected"
+    fi
+done
+
+# A name with a normal space is fine and must not be rejected.
+if is_csv_safe_value "Alice Johnson" "test value"; then
+    pass "a normal name containing a space is accepted"
+else
+    failed "a normal name containing a space is accepted"
+fi
+
+# Every generated row must have exactly the four expected columns.
+bad_cols="$(awk -F, 'NF != 4 {c++} END {print c+0}' "$PROJ_B/Helpers/assets.csv")"
+assert_eq "0" "$bad_cols" "every generated roster row has exactly 4 columns"
+gen_lines="$(wc -l < "$PROJ_B/Helpers/assets.csv" | tr -d ' ')"
+assert_eq "7" "$gen_lines" "a 6-student roster has 7 lines including the header"
+
 # --------------------------------------------------------------------------
 section "F. Threshold updates"
 # --------------------------------------------------------------------------
