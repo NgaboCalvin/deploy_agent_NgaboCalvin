@@ -13,7 +13,6 @@
 set -u
 set -o pipefail
 
-# Where the genuine template files live, relative to this script.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEMPLATE_DIR="$SCRIPT_DIR/templates"
 TEMPLATE_APP="$TEMPLATE_DIR/attendance_checker.py"
@@ -30,7 +29,6 @@ DEPLOY_IN_PROGRESS="no"
 # so a handler can never be tricked into escaping the working directory).
 CURRENT_DEPLOY_DIR=""
 
-# Exit status used when a deployment is interrupted.
 INTERRUPT_STATUS=130
 
 # --------------------------------------------------------------------------
@@ -104,7 +102,6 @@ validate_project_name() {
     return 0
 }
 
-# Accept a whole number between min and max inclusive.
 is_integer_in_range() {
     local value="$1" min="$2" max="$3"
     case "$value" in
@@ -266,8 +263,8 @@ apply_permissions() {
 # Roster handling
 # --------------------------------------------------------------------------
 
-# Sample names and addresses used by the fresh roster option. They are plain
-# arrays so the loop that writes the CSV stays easy to follow.
+# Plain arrays rather than one record per line, so the loop that writes the CSV
+# stays easy to follow.
 SAMPLE_NAMES=(
     "Alice Johnson" "Bob Smith" "Charlie Davis" "Diana Prince" "Ethan Cole"
     "Fatima Noor" "George Mensah" "Hannah Kim" "Ibrahim Osei" "Jasmine Lee"
@@ -290,7 +287,6 @@ SAMPLE_EMAILS=(
     "kevin.mutua@example.com" "lucy.akinyi@example.com" "miriam@example.com"
 )
 
-# How many sample records the generate option can supply.
 MAX_FRESH_STUDENTS="${#SAMPLE_NAMES[@]}"
 
 # Check that a value is safe to write straight into the roster CSV.
@@ -323,7 +319,6 @@ is_csv_safe_value() {
     return 0
 }
 
-# Confirm the whole built-in sample pool is safe before offering option B.
 check_sample_data() {
     local index
     for ((index = 0; index < MAX_FRESH_STUDENTS; index++)); do
@@ -347,7 +342,7 @@ check_sample_data() {
     return 0
 }
 
-# Count the student rows in templates/assets.csv (the header is not a student).
+# The header row is not a student.
 count_sample_students() {
     local rows
     rows="$(awk 'NR > 1 && NF > 0' "$TEMPLATE_ROSTER" | wc -l | tr -d ' ')"
@@ -405,8 +400,7 @@ PYEOF
     return 0
 }
 
-# Option A: copy the header plus the first N rows of the supplied sample
-# roster. awk keeps the copy portable and preserves each row exactly.
+# awk keeps the copy portable and preserves each row exactly.
 copy_sample_roster() {
     local project_dir="$1"
     local available count
@@ -451,8 +445,8 @@ copy_sample_roster() {
     return 0
 }
 
-# Option B: write a brand new roster. Every student starts at zero recorded
-# sessions because this is the first session of a new class.
+# Every student starts at zero recorded sessions because this is the first
+# session of a new class.
 generate_fresh_roster() {
     local project_dir="$1"
     local count index
@@ -621,8 +615,6 @@ set_total_sessions() {
     return 0
 }
 
-# Ask the instructor whether to change the alert thresholds, and keep asking
-# until the values are valid or the user backs out.
 ask_thresholds() {
     local config_file="$1"
     local answer warning failure
@@ -781,8 +773,7 @@ handle_deployment_interrupt() {
     exit 1
 }
 
-# Install the deployment traps. They are removed again by
-# remove_deployment_traps once the deployment finishes.
+# Removed again by remove_deployment_traps once the deployment finishes.
 install_deployment_traps() {
     trap 'handle_deployment_interrupt SIGINT'  INT
     trap 'handle_deployment_interrupt SIGTSTP' TSTP
@@ -817,12 +808,19 @@ abort_deployment() {
 # Feature 1: deploy a new project
 # --------------------------------------------------------------------------
 
-# Ask the user for the project name and store it in PROJECT_NAME_CHOICE.
-#
-# I use a global variable rather than printing the answer, because the prompt
-# messages and the answer would otherwise end up mixed together in the output.
+# A global rather than stdout, because the prompt messages and the answer would
+# otherwise end up mixed together in the output.
 ask_for_project_name() {
     PROJECT_NAME_CHOICE=""
+
+    # Showing the existing projects here is only a hint: a new deployment may
+    # legitimately reuse a name. It stops a typo from silently creating a
+    # second directory next to an existing one.
+    discover_projects
+    if [ "$PROJECT_COUNT" -gt 0 ]; then
+        info ""
+        show_project_list
+    fi
 
     info ""
     info "The project directory will be named ${PROJECT_PREFIX}<name>"
@@ -834,8 +832,8 @@ ask_for_project_name() {
     done
 }
 
-# Ask whether an existing project may be replaced. The answer is stored in
-# OVERWRITE_CHOICE ("yes" or "no") for the same reason as above.
+# The answer is stored in OVERWRITE_CHOICE ("yes" or "no") for the same reason
+# as above.
 confirm_overwrite() {
     local project_dir="$1"
     local answer
@@ -982,11 +980,163 @@ deploy_project() {
 }
 
 # --------------------------------------------------------------------------
+# Finding already deployed projects
+# --------------------------------------------------------------------------
+
+# The names of the projects discovered by discover_projects, and how many
+# there are. A plain indexed array is used because macOS Bash is 3.2, which
+# has no associative arrays.
+PROJECT_LIST=()
+PROJECT_COUNT=0
+
+# Scan the working directory for directories that look like a deployment and
+# fill PROJECT_LIST / PROJECT_COUNT. I match on the prefix and require a
+# non-empty remainder, so the working directory itself can never be picked.
+discover_projects() {
+    PROJECT_LIST=()
+    PROJECT_COUNT=0
+
+    local path dir_name name
+    for path in "$PWD/${PROJECT_PREFIX}"*; do
+        [ -d "$path" ] || continue
+
+        dir_name="${path##*/}"
+        case "$dir_name" in
+            "${PROJECT_PREFIX}"*) ;;
+            *) continue ;;
+        esac
+
+        name="${dir_name#"$PROJECT_PREFIX"}"
+        [ -n "$name" ] || continue
+
+        PROJECT_LIST[${#PROJECT_LIST[@]}]="$name"
+        PROJECT_COUNT=$((PROJECT_COUNT + 1))
+    done
+
+    return 0
+}
+
+# The list tells the user something useful rather than only echoing directory
+# names.
+describe_project() {
+    local project_dir="$1"
+    local missing required students
+
+    missing=0
+    for required in "attendance_checker.py" "Helpers/assets.csv" "Helpers/config.json"; do
+        if [ ! -f "$project_dir/$required" ]; then
+            missing=$((missing + 1))
+        fi
+    done
+
+    students="no roster"
+    if [ -f "$project_dir/Helpers/assets.csv" ]; then
+        students="$(awk 'NR > 1 && NF > 0' "$project_dir/Helpers/assets.csv" | wc -l | tr -d ' ')"
+        students="$students students"
+    fi
+
+    if [ "$missing" -gt 0 ]; then
+        printf '%s, INCOMPLETE (%d required file(s) missing)' "$students" "$missing"
+        return 0
+    fi
+
+    if [ -f "$project_dir/reports/attendance.log" ]; then
+        printf '%s, has recorded logs' "$students"
+    else
+        printf '%s, no logs yet' "$students"
+    fi
+    return 0
+}
+
+# Nothing is asked here, so the same listing can be shown as information
+# before a free-text prompt.
+show_project_list() {
+    local index
+
+    if [ "$PROJECT_COUNT" -eq 0 ]; then
+        info "No ${PROJECT_PREFIX}* projects were found in $PWD."
+        return 0
+    fi
+
+    info "Existing projects in $PWD:"
+    index=0
+    while [ "$index" -lt "$PROJECT_COUNT" ]; do
+        printf '  %2d) %s%s  (%s)\n' \
+            "$((index + 1))" \
+            "$PROJECT_PREFIX" \
+            "${PROJECT_LIST[$index]}" \
+            "$(describe_project "$PWD/${PROJECT_PREFIX}${PROJECT_LIST[$index]}")"
+        index=$((index + 1))
+    done
+    return 0
+}
+
+# Re-asks until the name is valid. Shared by the deploy prompt and by the
+# picker when there is nothing to pick from.
+prompt_valid_project_name() {
+    while true; do
+        IFS= read -r -p "Enter the project name: " PROJECT_NAME_CHOICE || return 1
+        if [ -n "$PROJECT_NAME_CHOICE" ] && validate_project_name "$PROJECT_NAME_CHOICE"; then
+            return 0
+        fi
+    done
+}
+
+# The list is shown first so the user can see what exists, then the answer may
+# be either the number shown in the list or the project name typed out in full.
+#
+# A number is only treated as a list choice when it is actually in range;
+# otherwise it falls through to the normal name validation, which keeps
+# projects whose name is all digits reachable.
+choose_existing_project() {
+    PROJECT_NAME_CHOICE=""
+
+    discover_projects
+
+    info ""
+    if [ "$PROJECT_COUNT" -eq 0 ]; then
+        warn "There are no deployed projects to choose from in $PWD."
+        info "Use option 1 to deploy one first, or type a name to try anyway."
+        info ""
+        prompt_valid_project_name || return 1
+        return 0
+    fi
+
+    show_project_list
+    info ""
+
+    local answer
+    while true; do
+        IFS= read -r -p "Select a project number, or type its name: " answer || return 1
+
+        if [ -z "$answer" ]; then
+            fail "Please enter a project number or a project name."
+            continue
+        fi
+
+        if [ "$answer" -eq "$answer" ] 2>/dev/null; then
+            if [ "$answer" -ge 1 ] 2>/dev/null && [ "$answer" -le "$PROJECT_COUNT" ]; then
+                PROJECT_NAME_CHOICE="${PROJECT_LIST[$((answer - 1))]}"
+                success "Selected: ${PROJECT_PREFIX}${PROJECT_NAME_CHOICE}"
+                return 0
+            fi
+            fail "'$answer' is not one of the numbers 1-$PROJECT_COUNT."
+            info "You can still type the project name in full."
+            continue
+        fi
+
+        if validate_project_name "$answer"; then
+            PROJECT_NAME_CHOICE="$answer"
+            return 0
+        fi
+    done
+}
+
+# --------------------------------------------------------------------------
 # Feature 2: run an already deployed project
 # --------------------------------------------------------------------------
 
-# Launch the genuine application from inside a project directory. I use a
-# subshell with cd so the menu keeps working from the repository root when
+# A subshell with cd, so the menu keeps working from the repository root when
 # the program exits.
 run_application_in_dir() {
     local project_dir="$1"
@@ -1009,7 +1159,6 @@ run_application_in_dir() {
     return "$status"
 }
 
-# Ask for a project name and confirm the three files the application needs.
 run_application() {
     local project_name project_dir dir_name
 
@@ -1020,7 +1169,7 @@ run_application() {
         return 1
     fi
 
-    ask_for_project_name || return 1
+    choose_existing_project || return 1
     dir_name="${PROJECT_PREFIX}${PROJECT_NAME_CHOICE}"
     if [ -z "$dir_name" ] || [ "$dir_name" = "$PROJECT_PREFIX" ]; then
         fail "No project name was given."
@@ -1052,14 +1201,12 @@ run_application() {
 # Feature 3: archive generated logs
 # --------------------------------------------------------------------------
 
-# A timestamp that matches the required YYYYMMDD_HHMMSS pattern.
 timestamp_now() {
     date '+%Y%m%d_%H%M%S'
 }
 
-# Copy one log into its archive directory without overwriting an existing file.
-# Two archive runs inside the same second would otherwise produce the same
-# name, so a numeric suffix is appended to the next one.
+# The same second twice would otherwise produce the same name, so a numeric
+# suffix is appended to the next one.
 archive_single_log() {
     local project_dir="$1"
     local source_file="$2"
@@ -1096,7 +1243,7 @@ archive_logs() {
 
     banner "Archive generated logs"
 
-    ask_for_project_name || return 1
+    choose_existing_project || return 1
     if [ -z "$PROJECT_NAME_CHOICE" ]; then
         fail "No project name was given."
         return 1
