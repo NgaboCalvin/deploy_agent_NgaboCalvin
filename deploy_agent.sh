@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-#
-# deploy_agent.sh - deployment agent for the attendance tracker project.
-#
-# I wrote this script to do three jobs from one menu:
-#   1. Deploy a new attendance_tracker_<name> project from templates/.
-#   2. Run a project that is already deployed.
-#   3. Archive the logs the application generates into reports/.
-#
-# The script targets macOS and Linux with the Bash that ships with macOS
-# (3.2), so I avoid Bash 4 features such as associative arrays and mapfile.
-
 set -u
 set -o pipefail
 
